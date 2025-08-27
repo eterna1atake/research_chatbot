@@ -11,6 +11,15 @@ from collections import Counter
 import hashlib
 import json
 
+# OCR support
+try:
+    import pytesseract
+    from PIL import Image
+    import io
+    OCR_AVAILABLE = True
+except ImportError:
+    OCR_AVAILABLE = False
+
 # ดาวน์โหลด NLTK data
 try:
     nltk.download('punkt', quiet=True)
@@ -20,12 +29,14 @@ except:
     pass
 
 class EnhancedDocumentReader:
-    def __init__(self, file_path: str):
+    def __init__(self, file_path: str, use_ocr: bool = False, expert_role: str = ""):
         self.file_path = file_path
         self.content_cache = {}
         self.metadata = {}
         self.sections = {}
         self.keywords = set()
+        self.use_ocr = use_ocr and OCR_AVAILABLE
+        self.expert_role = expert_role
         
     def validate_file(self) -> bool:
         """ตรวจสอบไฟล์อย่างละเอียด"""
@@ -228,8 +239,26 @@ class EnhancedDocumentReader:
         except Exception as e:
             return f"Error reading DOCX: {str(e)}"
 
+    def extract_text_with_ocr(self, page) -> str:
+        """ใช้ OCR เพื่อดึงข้อความจากหน้า PDF"""
+        try:
+            # แปลงหน้าเป็นภาพ
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # เพิ่มความละเอียด
+            img_data = pix.tobytes("png")
+            
+            # เปิดภาพด้วย PIL
+            img = Image.open(io.BytesIO(img_data))
+            
+            # ใช้ OCR
+            text = pytesseract.image_to_string(img, lang='tha+eng')
+            
+            return text.strip()
+        except Exception as e:
+            print(f"OCR Error: {e}")
+            return ""
+
     def read_pdf_advanced(self) -> str:
-        """อ่าน PDF อย่างละเอียดและแม่นยำ"""
+        """อ่าน PDF อย่างละเอียดและแม่นยำ พร้อม OCR support"""
         try:
             doc = fitz.open(self.file_path)
             full_content = []
@@ -247,26 +276,18 @@ class EnhancedDocumentReader:
             for page_num in range(len(doc)):
                 page = doc.load_page(page_num)
                 
-                # ลองหลายวิธีในการดึงข้อความ
-                methods = [
-                    lambda p: p.get_text("text"),
-                    lambda p: p.get_text("dict"),
-                    lambda p: p.get_text("html"),
-                    lambda p: p.get_text("blocks")
-                ]
+                # ลองดึงข้อความแบบปกติก่อน
+                text = page.get_text("text")
                 
-                page_content = ""
+                # ถ้าไม่มีข้อความหรือข้อความน้อยเกินไป และเปิดใช้ OCR
+                if (not text.strip() or len(text.strip()) < 50) and self.use_ocr:
+                    print(f"Using OCR for page {page_num + 1}")
+                    text = self.extract_text_with_ocr(page)
+                    if text:
+                        text = f"[OCR] {text}"
                 
-                # วิธีที่ 1: ข้อความทั่วไป
-                try:
-                    text = page.get_text("text")
-                    if text.strip():
-                        page_content = self.enhanced_clean_text(text)
-                except:
-                    pass
-                
-                # วิธีที่ 2: ดึงข้อมูลแบบ structured
-                if not page_content:
+                # ถ้ายังไม่มีข้อความ ลองวิธีอื่น
+                if not text.strip():
                     try:
                         blocks = page.get_text("dict")["blocks"]
                         text_blocks = []
@@ -280,25 +301,16 @@ class EnhancedDocumentReader:
                                     if line_text.strip():
                                         text_blocks.append(line_text.strip())
                         
-                        page_content = '\n'.join(text_blocks)
-                        page_content = self.enhanced_clean_text(page_content)
+                        text = '\n'.join(text_blocks)
                     except:
-                        pass
+                        text = f"[หน้า {page_num + 1}: ไม่สามารถดึงข้อความได้]"
                 
-                # วิธีที่ 3: ถ้ายังไม่ได้ ลอง OCR (ถ้ามี)
-                if not page_content:
-                    try:
-                        # ถ้าเป็นภาพหรือ scanned document
-                        pix = page.get_pixmap()
-                        # สำหรับ OCR ต้องติดตั้ง pytesseract
-                        page_content = f"[หน้า {page_num + 1}: ไม่สามารถดึงข้อความได้ อาจเป็นภาพหรือ scanned document]"
-                    except:
-                        page_content = f"[หน้า {page_num + 1}: ไม่สามารถอ่านได้]"
-                
-                if page_content and page_content.strip():
-                    full_content.append(f"\n=== หน้า {page_num + 1} ===")
-                    full_content.append(page_content)
-                    full_content.append("=" * 50)
+                if text and text.strip():
+                    cleaned_text = self.enhanced_clean_text(text)
+                    if cleaned_text:
+                        full_content.append(f"\n=== หน้า {page_num + 1} ===")
+                        full_content.append(cleaned_text)
+                        full_content.append("=" * 50)
             
             doc.close()
             
@@ -459,6 +471,11 @@ class EnhancedDocumentReader:
             # เพิ่มข้อมูล metadata
             summary_parts = []
             
+            # เพิ่ม expert role ถ้ามี
+            if self.expert_role:
+                summary_parts.append(f"=== ผู้เชี่ยวชาญ: {self.expert_role} ===")
+                summary_parts.append("")
+            
             if self.metadata:
                 summary_parts.append("=== ข้อมูลเอกสาร ===")
                 for key, value in self.metadata.items():
@@ -479,6 +496,11 @@ class EnhancedDocumentReader:
             
             summary_parts.append("=== เนื้อหาเอกสาร ===")
             summary_parts.append(content)
+            
+            # เพิ่มข้อมูล OCR ถ้าใช้
+            if self.use_ocr:
+                summary_parts.append(f"\n\n[🔍 ใช้ OCR สำหรับการประมวลผล PDF]")
+            
             summary_parts.append(f"\n\n[✅ เอกสาร KMUTNB ถูกโหลดและประมวลผลเรียบร้อยแล้ว - รวม {len(content):,} ตัวอักษร]")
             
             final_content = '\n'.join(summary_parts)
@@ -499,22 +521,22 @@ class EnhancedDocumentReader:
         return self.get_comprehensive_summary(max_chars=50000)
 
 # ฟังก์ชันหลักที่ app.py จะเรียกใช้
-def get_kmutnb_summary(file_path: str) -> str:
+def get_kmutnb_summary(file_path: str, use_ocr: bool = False, expert_role: str = "") -> str:
     """ฟังก์ชันหลักสำหรับอ่านและสรุปเอกสาร KMUTNB (แบบใหม่)"""
-    reader = EnhancedDocumentReader(file_path)
+    reader = EnhancedDocumentReader(file_path, use_ocr=use_ocr, expert_role=expert_role)
     return reader.get_comprehensive_summary()
 
-def read_kmutnb_dataset(file_path: str) -> str:
+def read_kmutnb_dataset(file_path: str, use_ocr: bool = False, expert_role: str = "") -> str:
     """อ่านเอกสาร KMUTNB แบบเต็ม (แบบใหม่)"""
-    reader = EnhancedDocumentReader(file_path)
+    reader = EnhancedDocumentReader(file_path, use_ocr=use_ocr, expert_role=expert_role)
     content = reader.get_comprehensive_summary(max_chars=100000)
     if content is None or content.startswith("Error"):
         return "Error: Could not read the dataset file."
     return content
 
-def search_in_document(file_path: str, search_term: str) -> str:
+def search_in_document(file_path: str, search_term: str, use_ocr: bool = False) -> str:
     """ค้นหาคำในเอกสาร (แบบใหม่)"""
-    reader = EnhancedDocumentReader(file_path)
+    reader = EnhancedDocumentReader(file_path, use_ocr=use_ocr)
     content = reader.read_document()
     
     if not content or content.startswith("Error"):
@@ -535,7 +557,7 @@ if __name__ == "__main__":
         print("Testing Enhanced Document Reader...")
         print("=" * 50)
         
-        reader = EnhancedDocumentReader(test_file)
+        reader = EnhancedDocumentReader(test_file, use_ocr=True, expert_role="ผู้เชี่ยวชาญด้านการศึกษา")
         summary = reader.get_comprehensive_summary()
         
         print("Document Summary:")

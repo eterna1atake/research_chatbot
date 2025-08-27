@@ -16,7 +16,7 @@ try:
 except ImportError:
     ENHANCED_READER_AVAILABLE = False
     # ฟังก์ชันสำรองแบบเดิม
-    def get_kmutnb_summary(file_path: str) -> str:
+    def get_kmutnb_summary(file_path: str, use_ocr: bool = False, expert_role: str = "") -> str:
         try:
             if file_path.lower().endswith('.txt'):
                 with open(file_path, 'r', encoding='utf-8') as f:
@@ -112,7 +112,7 @@ class EnhancedRateLimiter:
 
 rate_limiter = EnhancedRateLimiter()
 
-# Document management
+# Document management with OCR and expert role support
 class DocumentManager:
     def __init__(self):
         if 'document_content' not in st.session_state:
@@ -125,9 +125,21 @@ class DocumentManager:
             st.session_state.document_keywords = []
         if 'last_file_path' not in st.session_state:
             st.session_state.last_file_path = None
+        if 'use_ocr' not in st.session_state:
+            st.session_state.use_ocr = False
+        if 'expert_role' not in st.session_state:
+            st.session_state.expert_role = ""
     
-    def load_document(self, file_path: str) -> tuple[str, str]:
-        if st.session_state.last_file_path == file_path and st.session_state.document_content:
+    def load_document(self, file_path: str, use_ocr: bool = False, expert_role: str = "") -> tuple[str, str]:
+        # ตรวจสอบว่าต้องโหลดใหม่หรือไม่
+        needs_reload = (
+            st.session_state.last_file_path != file_path or
+            st.session_state.use_ocr != use_ocr or
+            st.session_state.expert_role != expert_role or
+            not st.session_state.document_content
+        )
+        
+        if not needs_reload:
             return st.session_state.document_content, "✅ ใช้เอกสารที่โหลดไว้แล้ว"
         
         if not os.path.exists(file_path):
@@ -142,25 +154,33 @@ class DocumentManager:
         
         try:
             if ENHANCED_READER_AVAILABLE:
-                reader = EnhancedDocumentReader(file_path)
+                reader = EnhancedDocumentReader(file_path, use_ocr=use_ocr, expert_role=expert_role)
                 content = reader.get_comprehensive_summary()
                 
                 st.session_state.document_metadata = reader.metadata
                 st.session_state.document_sections = reader.sections
                 st.session_state.document_keywords = list(reader.keywords)
                 
-                status = f"✅ โหลดเอกสารสำเร็จ (Enhanced Mode) - {len(content):,} ตัวอักษร"
+                status = f"โหลดเอกสารสำเร็จ (Enhanced Mode)"
+                if use_ocr:
+                    status += " + OCR"
+                if expert_role:
+                    status += f" | ผู้เชี่ยวชาญ: {expert_role}"
+                status += f" - {len(content):,} ตัวอักษร"
+                
                 if reader.metadata:
                     status += f" | หน้า: {reader.metadata.get('pages', 'ไม่ทราบ')}"
             else:
-                content = get_kmutnb_summary(file_path)
-                status = f"✅ โหลดเอกสารสำเร็จ (Basic Mode) - {len(content):,} ตัวอักษร"
+                content = get_kmutnb_summary(file_path, use_ocr=use_ocr, expert_role=expert_role)
+                status = f"โหลดเอกสารสำเร็จ (Basic Mode) - {len(content):,} ตัวอักษร"
             
             if content.startswith("Error:"):
                 return None, content
             
             st.session_state.document_content = content
             st.session_state.last_file_path = file_path
+            st.session_state.use_ocr = use_ocr
+            st.session_state.expert_role = expert_role
             
             return content, status
             
@@ -191,7 +211,11 @@ class DocumentManager:
             return "❌ ไม่มีเอกสารที่โหลดไว้"
         
         if ENHANCED_READER_AVAILABLE and st.session_state.last_file_path:
-            return search_in_document(st.session_state.last_file_path, search_term)
+            return search_in_document(
+                st.session_state.last_file_path, 
+                search_term, 
+                use_ocr=st.session_state.use_ocr
+            )
         else:
             content = st.session_state.document_content
             lines = content.split('\n')
@@ -253,9 +277,9 @@ def safe_api_call(api_function, max_retries=3):
     
     return "ไม่สามารถประมวลผลได้ในขณะนี้"
 
-def enhanced_response_generation(prompt: str, document_content: str) -> str:
+def enhanced_response_generation(prompt: str, document_content: str, expert_role: str = "") -> str:
     question_type = analyze_question_type(prompt)
-    enhanced_prompt = enhance_prompt_based_on_type(prompt, question_type)
+    enhanced_prompt = enhance_prompt_based_on_type(prompt, question_type, expert_role)
     
     def generate_response():
         history = []
@@ -294,17 +318,21 @@ def analyze_question_type(prompt: str) -> str:
     else:
         return 'general'
 
-def enhance_prompt_based_on_type(prompt: str, question_type: str) -> str:
+def enhance_prompt_based_on_type(prompt: str, question_type: str, expert_role: str = "") -> str:
+    base_enhancement = ""
+    if expert_role:
+        base_enhancement = f"คุณเป็นผู้เชี่ยวชาญด้าน {expert_role} กรุณาตอบคำถามในฐานะผู้เชี่ยวชาญ: "
+    
     enhancements = {
-        'search': "กรุณาค้นหาข้อมูลที่เกี่ยวข้องในเอกสารและตอบอย่างละเอียด: ",
-        'compare': "กรุณาเปรียบเทียบและวิเคราะห์ความแตกต่างอย่างชัดเจน: ",
-        'explain': "กรุณาอธิบายอย่างละเอียดและให้ตัวอย่างประกอบ: ",
-        'list': "กรุณาจัดทำรายการที่ครบถ้วนและเรียงลำดับ: ",
-        'example': "กรุณาให้ตัวอย่างที่ชัดเจนและหลากหลาย: ",
-        'general': "กรุณาตอบคำถามอย่างละเอียดและครบถ้วน: "
+        'search': f"{base_enhancement}กรุณาค้นหาข้อมูลที่เกี่ยวข้องในเอกสารและตอบอย่างละเอียด: ",
+        'compare': f"{base_enhancement}กรุณาเปรียบเทียบและวิเคราะห์ความแตกต่างอย่างชัดเจน: ",
+        'explain': f"{base_enhancement}กรุณาอธิบายอย่างละเอียดและให้ตัวอย่างประกอบ: ",
+        'list': f"{base_enhancement}กรุณาจัดทำรายการที่ครบถ้วนและเรียงลำดับ: ",
+        'example': f"{base_enhancement}กรุณาให้ตัวอย่างที่ชัดเจนและหลากหลาย: ",
+        'general': f"{base_enhancement}กรุณาตอบคำถามอย่างละเอียดและครบถ้วน: "
     }
     
-    return enhancements.get(question_type, '') + prompt
+    return enhancements.get(question_type, base_enhancement + "กรุณาตอบคำถามอย่างละเอียดและครบถ้วน: ") + prompt
 
 # Page config
 st.set_page_config(
@@ -316,18 +344,30 @@ st.set_page_config(
 
 # Sidebar with enhanced controls
 with st.sidebar:
+    st.header("Settings")
     
+    # OCR Settings
+    use_ocr = st.checkbox("OCR PDF", value=False, 
+                         help="เปิดใช้ OCR เพื่ออ่าน PDF ที่เป็นภาพหรือ scanned document")
+    
+    # Expert Role Settings
+    expert_role = st.text_input("Role", 
+                               placeholder="",
+                               help="กำหนดบทบาทเพื่อให้การตอบคำถามแม่นยำขึ้น")
+    
+    # Document Settings
+    st.subheader("Document")
+    file_path = st.text_input("Path File Document", 
+                             value="/Users/zayxaxto/Documents/kmutnb_chatbot/workaw/dataset_reseach.pdf",
+                             help="ระบุ path ของไฟล์เอกสาร")
+    
+    if st.button("Reload", use_container_width=True):
+        st.session_state.document_content = None
+        st.rerun()
     
     if st.button("Clear History", use_container_width=True):
         clear_history()
 
-    
-    requests_count = len([
-        call for call in st.session_state.get('api_calls', [])
-        if time.time() - call < 60
-    ])
-   
-    
    
 
 # Main app
@@ -343,9 +383,8 @@ if "messages" not in st.session_state:
         }
     ]
 
-# Load document
-file_path = "/Users/zayxaxto/Documents/kmutnb_chatbot/workaw/dataset_reseach.pdf"
-file_content, load_status = doc_manager.load_document(file_path)
+# Load document with new settings
+file_content, load_status = doc_manager.load_document(file_path, use_ocr=use_ocr, expert_role=expert_role)
 
 # Display load status
 if file_content is None:
@@ -387,7 +426,7 @@ if prompt := st.chat_input("💭 Type your question"):
                 search_term = prompt.split(":", 1)[1].strip()
                 response_text = doc_manager.search_document(search_term)
             else:
-                response_text = enhanced_response_generation(prompt, file_content)
+                response_text = enhanced_response_generation(prompt, file_content, expert_role)
             
             st.write(response_text)
             st.session_state["messages"].append({"role": "model", "content": response_text})

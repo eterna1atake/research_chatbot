@@ -14,3 +14,7 @@ gspread
 oauth2client
 pprintpp
 python-docx==1.1.0
+PyMuPDF
+nltk
+pytesseract
+Pillow
