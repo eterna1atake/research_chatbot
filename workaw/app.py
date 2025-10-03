@@ -527,7 +527,7 @@ with st.sidebar:
     
     file_path = st.text_input(
         "เส้นทางไฟล์:", 
-        value="FinalDataset.pdf"
+        value="workaw/FinalDataset.pdf"
     )
     
     if st.button("🔄 โหลดใหม่", use_container_width=True):
