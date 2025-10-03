@@ -4,52 +4,18 @@ import json
 import re
 import google.generativeai as genai
 import streamlit as st
-from prompt import PROMPT_WORKAW
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
-from google.api_core.exceptions import ResourceExhausted
-from typing import Dict, List, Any
-
-# Import enhanced document reader
-try:
-    from document_reader import EnhancedDocumentReader, get_kmutnb_summary, search_in_document
-    ENHANCED_READER_AVAILABLE = True
-except ImportError:
-    ENHANCED_READER_AVAILABLE = False
-    # ฟังก์ชันสำรองแบบเดิม
-    def get_kmutnb_summary(file_path: str, use_ocr: bool = False, expert_role: str = "") -> str:
-        try:
-            if file_path.lower().endswith('.txt'):
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-            elif file_path.lower().endswith('.pdf'):
-                try:
-                    import fitz
-                    doc = fitz.open(file_path)
-                    content = ""
-                    for page in doc:
-                        content += page.get_text()
-                    doc.close()
-                except ImportError:
-                    return "Error: PyMuPDF not installed. Please install: pip install PyMuPDF"
-            else:
-                return "Error: Unsupported file type. Please use .txt or .pdf"
-            
-            if len(content) > 15000:
-                content = content[:15000] + "\n\n[เนื้อหาถูกตัดเพื่อประหยัด token]"
-            
-            return content
-        except Exception as e:
-            return f"Error reading file: {str(e)}"
+import hashlib
 
 # Configure API
-genai.configure(api_key="AIzaSyDnfUxgwBV4QaoXCo1hPHn4536BtlVAeq4")
+genai.configure(api_key="AIzaSyCEJLy1bwbtXnjtdC6i2clawIEAgEcjwaw")
 
-# Enhanced generation config
+# Generation config
 generation_config = {
-    "temperature": 0.1,
-    "top_p": 0.95,
-    "top_k": 64,
-    "max_output_tokens": 1024,
+    "temperature": 0.15,
+    "top_p": 0.92,
+    "top_k": 45,
+    "max_output_tokens": 12000,
     "response_mime_type": "text/plain",
 }
 
@@ -60,344 +26,548 @@ SAFETY_SETTINGS = {
     HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE
 }
 
+# Enhanced keyword mapping
+KEYWORDS = {
+    "รับสมัคร": ["สมัคร", "ลงทะเบียน", "apply", "admission", "enrollment", "เปิดรับ", "การรับ", "สมัครเข้า"],
+    "เอกสาร": ["หลักฐาน", "documents", "ใบสำคัญ", "ใบรับรอง", "ประกอบ", "เอกสารประกอบ", "หลักฐานการสมัคร"],
+    "ค่าเทอม": ["ค่าธรรมเนียม", "ค่าใช้จ่าย", "tuition", "fee", "ค่าเล่าเรียน", "ค่าลงทะเบียน", "ค่าใช้จ่ายการศึกษา"],
+    "ปริญญาตรี": ["ป.ตรี", "bachelor", "undergraduate", "บัณฑิต", "ระดับปริญญาตรี"],
+    "ปริญญาโท": ["ป.โท", "master", "graduate", "มหาบัณฑิต", "ระดับปริญญาโท"],
+    "ปริญญาเอก": ["ป.เอก", "PhD", "doctorate", "ดุษฎีบัณฑิต", "ระดับปริญญาเอก"],
+    "สาขา": ["สาขาวิชา", "แผนก", "program", "major", "หลักสูตร", "วิชาเอก", "สาขาวิชาเอก"],
+    "วิศวกรรม": ["วิศวะ", "engineer", "engineering", "คณะวิศวกรรมศาสตร์"],
+    "เทคโนโลยี": ["เทค", "technology", "เทคโนโลยีสารสนเทศ", "เทคโนโลยีอุตสาหกรรม"],
+    "ครุศาสตร์": ["ครุ", "ศึกษาศาสตร์", "การศึกษา", "education", "คณะครุศาสตร์อุตสาหกรรม"],
+    "ไฟฟ้า": ["electrical", "อิเล็กทรอนิกส์", "electronics", "วิศวกรรมไฟฟ้า"],
+    "คอมพิวเตอร์": ["computer", "คอม", "สารสนเทศ", "IT", "วิศวกรรมคอมพิวเตอร์"],
+    "เครื่องกล": ["mechanical", "กล", "วิศวกรรมเครื่องกล"],
+    "โยธา": ["civil", "โครงสร้าง", "วิศวกรรมโยธา"],
+    "อุตสาหการ": ["industrial", "อุตสาหกรรม", "วิศวกรรมอุตสาหการ"],
+    "สอบ": ["การสอบ", "exam", "test", "ทดสอบ", "การทดสอบ"],
+    "เกรด": ["เกรดเฉลี่ย", "GPA", "ผลการเรียน", "คะแนน", "เกรดขั้นต่ำ"],
+    "ทุน": ["ทุนการศึกษา", "scholarship", "ทุนเรียนดี"],
+    "ต่อ": ["เรียนต่อ", "ศึกษาต่อ", "continue", "การเรียนต่อ", "ต่อได้", "สมัครได้"],
+    "คุณสมบัติ": ["เงื่อนไข", "qualification", "requirement", "ข้อกำหนด"],
+    "ระยะเวลา": ["กำหนดเวลา", "duration", "ช่วงเวลา", "วันที่"],
+    "วิธีการ": ["ขั้นตอน", "procedure", "กระบวนการ", "method"],
+    "คณะ": ["faculty", "สำนัก", "วิทยาลัย"],
+    "สาย": ["แผนการเรียน", "สายการเรียน", "แผน"]
+}
+
+# System Prompt ที่ฉลาดและเข้าใจบริบท
+SYSTEM_PROMPT = """คุณเป็น AI ที่ฉลาดในการตอบคำถามเกี่ยวกับ KMUTNB
+
+หลักการตอบที่สำคัญ:
+
+**1. เข้าใจระดับความละเอียดที่ต้องการ:**
+
+ถ้าถามแบบกว้างๆ → ตอบแบบกว้างๆ
+- "ม.6 สายศิลป์ต่ออะไรได้บ้าง?" → ตอบเฉพาะชื่อคณะ
+- "มีคณะอะไรบ้าง?" → ตอบเฉพาะชื่อคณะ
+- "มีกี่สาขา?" → ตอบจำนวน + ชื่อสาขา
+
+ถ้าถามแบบละเอียด → ตอบแบบละเอียด
+- "สาขาคอมพิวเตอร์มีอะไรบ้าง?" → แจกแจงทุกหลักสูตร
+- "คุณสมบัติการสมัครคืออะไร?" → ระบุคุณสมบัติทุกข้อ
+- "ขั้นตอนการสมัครยังไง?" → แจกแจงทุกขั้นตอน
+
+**2. รูปแบบการตอบตามประเภทคำถาม:**
+
+**คำถามเกี่ยวกับคณะที่รับสมัคร:**
+ตอบแค่ชื่อคณะ ไม่ต้องแจกแจงหลักสูตร
+ตัวอย่าง: "ม.6 สายศิลป์ต่อได้ที่คณะครุศาสตร์อุตสาหกรรม"
+
+**คำถามเกี่ยวกับจำนวนคณะ/สาขา:**
+ตอบจำนวน + ชื่อคณะ/สาขา (ไม่ต้องบอกหลักสูตรย่อย)
+
+**คำถามเกี่ยวกับหลักสูตรในคณะ:**
+แจกแจงหลักสูตรทุกหลักสูตรพร้อมจัดกลุ่ม
+
+**คำถามเกี่ยวกับคุณสมบัติ:**
+แจกแจงคุณสมบัติทุกข้อ + ระบุตัวเลขชัดเจน
+
+**คำถามเกี่ยวกับเอกสาร:**
+ระบุเอกสารทุกรายการ
+
+**คำถามเกี่ยวกับค่าใช้จ่าย:**
+ระบุจำนวนเงิน + แยกรายการ
+
+**3. การจัดรูปแบบ:**
+- ถ้าตอบสั้นๆ → ใช้ประโยค ไม่ต้องใช้ bullet points
+- ถ้าตอบหลายข้อ → ใช้ bullet points (•)
+- แบ่งหมวดหมู่ชัดเจน
+- เว้นบรรทัดเหมาะสม
+
+**4. ข้อห้าม:**
+- ห้ามใช้: ครับ ค่ะ นะ
+- ห้ามอ้างอิง: หน้า ข้อ
+- ห้ามเสริมข้อมูลที่ไม่เกี่ยวข้อง
+- ห้ามตอบยาวเกินจำเป็น
+
+**5. ตัวอย่างการตอบที่ดี:**
+
+คำถาม: "จบ ม.6 สายศิลป์ต่ออะไรได้บ้าง?"
+ตอบ: "สายศิลป์สามารถสมัครเข้าศึกษาต่อได้ที่คณะครุศาสตร์อุตสาหกรรม"
+
+คำถาม: "คณะครุศาสตร์มีกี่สาขา?"
+ตอบ: "คณะครุศาสตร์อุตสาหกรรมมี 22 หลักสูตร แบ่งเป็น:
+
+**ปริญญาตรี: 7 หลักสูตร**
+- หลักสูตรครุศาสตร์อุตสาหกรรมบัณฑิต (ค.อ.บ.) 4 ปี
+- วิศวกรรมแมคคาทรอนิกส์และระบบอัตโนมัติ (TT)
+...
+
+**ปริญญาโท: 7 หลักสูตร**
+...
+
+**ปริญญาเอก: 8 หลักสูตร**
+..."
+
+คำถาม: "มีคณะอะไรบ้าง?"
+ตอบ: "KMUTNB มีหลายคณะ อาทิ:
+- คณะวิศวกรรมศาสตร์
+- คณะครุศาสตร์อุตสาหกรรม
+- คณะเทคโนโลยี
+..."
+
+สิ่งสำคัญ: **ตอบตรงคำถาม ไม่ยาวเกินจำเป็น และเข้าใจบริบท**
+"""
+
 model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",
+    model_name="gemini-2.5-flash",
     safety_settings=SAFETY_SETTINGS,
     generation_config=generation_config,
-    system_instruction=PROMPT_WORKAW,
+    system_instruction=SYSTEM_PROMPT,
 )
 
-# Enhanced Rate limiting with better tracking
-class EnhancedRateLimiter:
+class DocumentProcessor:
+    def __init__(self):
+        self.cache_dir = "cache"
+        os.makedirs(self.cache_dir, exist_ok=True)
+    
+    def get_file_hash(self, file_path: str) -> str:
+        try:
+            with open(file_path, 'rb') as f:
+                return hashlib.md5(f.read()).hexdigest()
+        except:
+            return None
+    
+    def load_from_cache(self, file_hash: str) -> str:
+        cache_file = os.path.join(self.cache_dir, f"{file_hash}.txt")
+        if os.path.exists(cache_file):
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                return f.read()
+        return None
+    
+    def save_to_cache(self, file_hash: str, content: str):
+        cache_file = os.path.join(self.cache_dir, f"{file_hash}.txt")
+        with open(cache_file, 'w', encoding='utf-8') as f:
+            f.write(content)
+    
+    def read_pdf_optimized(self, file_path: str) -> str:
+        if not os.path.exists(file_path):
+            return "Error: File not found"
+        
+        file_hash = self.get_file_hash(file_path)
+        if file_hash:
+            cached_content = self.load_from_cache(file_hash)
+            if cached_content:
+                return cached_content
+        
+        try:
+            import fitz
+            doc = fitz.open(file_path)
+            
+            full_text = ""
+            total_pages = len(doc)
+            
+            for page_num in range(total_pages):
+                try:
+                    page = doc[page_num]
+                    page_text = page.get_text("text")
+                    
+                    if page_text.strip():
+                        page_text = self.clean_text(page_text)
+                        full_text += f"\n{page_text}\n"
+                        
+                except Exception:
+                    continue
+            
+            doc.close()
+            
+            if file_hash and full_text:
+                self.save_to_cache(file_hash, full_text)
+            
+            return full_text
+            
+        except ImportError:
+            return "Error: ต้องติดตั้ง PyMuPDF (pip install PyMuPDF)"
+        except Exception as e:
+            return f"Error: {str(e)}"
+    
+    def clean_text(self, text: str) -> str:
+        text = re.sub(r'\(หน้า\s*\d+[^)]*\)', '', text)
+        text = re.sub(r'\(ข้อ\s*[\d.]+\)', '', text)
+        text = re.sub(r'หน้า\s*\d+[^,\n]*', '', text)
+        text = re.sub(r'ข้อ\s*[\d.]+[^,\n]*', '', text)
+        text = re.sub(r'=== หน้า \d+ ===', '', text)
+        text = re.sub(r'\x00', '', text)
+        text = re.sub(r'\f', '\n', text)
+        text = re.sub(r'\r\n', '\n', text)
+        text = re.sub(r'\r', '\n', text)
+        text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
+        text = re.sub(r' +', ' ', text)
+        
+        return text.strip()
+
+class SmartSearcher:
+    def __init__(self):
+        self.max_chunk_size = 200000
+    
+    def analyze_query_type(self, query: str) -> dict:
+        """วิเคราะห์ประเภทคำถามเพื่อกำหนดระดับความละเอียดในการตอบ"""
+        query_lower = query.lower()
+        
+        analysis = {
+            "detail_level": "medium",  # low, medium, high
+            "question_type": "general",
+            "needs_list": False
+        }
+        
+        # คำถามแบบกว้างๆ (ตอบสั้นๆ)
+        broad_patterns = [
+            r'ต่ออะไรได้',
+            r'มีคณะ(อะไร)?บ้าง',
+            r'รับสาย(อะไร)?',
+            r'สมัครได้(ที่)?ไหน'
+        ]
+        
+        if any(re.search(pattern, query_lower) for pattern in broad_patterns):
+            analysis["detail_level"] = "low"
+            analysis["question_type"] = "faculty_list"
+            return analysis
+        
+        # คำถามเกี่ยวกับจำนวน (ตอบจำนวน + ชื่อ)
+        count_patterns = [
+            r'(มี)?กี่(คณะ|สาขา|หลักสูตร)',
+            r'จำนวน(คณะ|สาขา|หลักสูตร)',
+            r'ทั้งหมดกี่'
+        ]
+        
+        if any(re.search(pattern, query_lower) for pattern in count_patterns):
+            analysis["detail_level"] = "medium"
+            analysis["question_type"] = "count"
+            analysis["needs_list"] = True
+            return analysis
+        
+        # คำถามละเอียด (ตอบแบบละเอียด)
+        detailed_patterns = [
+            r'(มี|เปิด)(สาขา|หลักสูตร)(อะไร|ไหน)?บ้าง',
+            r'คุณสมบัติ',
+            r'เอกสาร',
+            r'ค่าใช้จ่าย',
+            r'ค่าธรรมเนียม',
+            r'ขั้นตอน',
+            r'วิธีการ'
+        ]
+        
+        if any(re.search(pattern, query_lower) for pattern in detailed_patterns):
+            analysis["detail_level"] = "high"
+            analysis["question_type"] = "detailed"
+            analysis["needs_list"] = True
+        
+        return analysis
+    
+    def expand_query(self, query: str) -> list:
+        expanded = [query.lower()]
+        query_lower = query.lower()
+        
+        for keyword, synonyms in KEYWORDS.items():
+            if keyword in query_lower:
+                expanded.extend([s.lower() for s in synonyms])
+            for syn in synonyms:
+                if syn.lower() in query_lower:
+                    expanded.append(keyword.lower())
+                    expanded.extend([s.lower() for s in synonyms])
+        
+        words = query_lower.split()
+        for word in words:
+            if len(word) > 2:
+                expanded.append(word)
+        
+        return list(set(expanded))
+    
+    def find_relevant_chunks(self, content: str, query: str, max_chunks: int = 20) -> list:
+        expanded_keywords = self.expand_query(query)
+        paragraphs = re.split(r'\n\s*\n', content)
+        scored_chunks = []
+        
+        for i, paragraph in enumerate(paragraphs):
+            if not paragraph.strip() or len(paragraph.strip()) < 20:
+                continue
+                
+            paragraph_lower = paragraph.lower()
+            score = 0
+            matched_keywords = set()
+            
+            for keyword in expanded_keywords:
+                keyword_lower = keyword.lower()
+                exact_matches = len(re.findall(rf'\b{re.escape(keyword_lower)}\b', paragraph_lower))
+                if exact_matches > 0:
+                    score += exact_matches * 15
+                    matched_keywords.add(keyword_lower)
+                
+                partial_matches = paragraph_lower.count(keyword_lower) - exact_matches
+                score += partial_matches * 5
+                
+                if keyword_lower in query.lower():
+                    score += exact_matches * 10
+            
+            list_indicators = ["1.", "2.", "3.", "•", "-", "ก.", "ข.", "ค.", "ปริญญา", "หลักสูตร", "สาขา", "คณะ"]
+            for indicator in list_indicators:
+                if indicator in paragraph:
+                    score += 5
+            
+            context_keywords = [
+                "หลักสูตร", "สาขา", "คุณสมบัติ", "การรับสมัคร", "เงื่อนไข", 
+                "ค่าใช้จ่าย", "ระยะเวลา", "ขั้นตอน", "วิธีการ", "เอกสาร",
+                "ค่าธรรมเนียม", "ทุนการศึกษา", "การสอบ", "เกรด", "คณะ"
+            ]
+            context_bonus = sum(5 for ctx_word in context_keywords if ctx_word in paragraph_lower)
+            score += context_bonus
+            
+            if len(paragraph) > 200:
+                score += 3
+            
+            score += len(matched_keywords) * 5
+            
+            if score > 0:
+                extended_chunk = ""
+                start_idx = max(0, i-1)
+                end_idx = min(len(paragraphs), i+2)
+                
+                for j in range(start_idx, end_idx):
+                    if paragraphs[j].strip():
+                        extended_chunk += paragraphs[j].strip() + "\n\n"
+                
+                scored_chunks.append((score, i, extended_chunk.strip()))
+        
+        scored_chunks.sort(key=lambda x: x[0], reverse=True)
+        
+        selected_chunks = []
+        total_length = 0
+        seen_content = set()
+        
+        for score, para_num, chunk in scored_chunks[:max_chunks]:
+            chunk_hash = hash(chunk[:100])
+            if chunk_hash in seen_content:
+                continue
+            seen_content.add(chunk_hash)
+            
+            if total_length + len(chunk) > self.max_chunk_size:
+                remaining_space = self.max_chunk_size - total_length
+                if remaining_space > 500:
+                    chunk = chunk[:remaining_space] + "..."
+                    selected_chunks.append(chunk)
+                break
+                
+            selected_chunks.append(chunk)
+            total_length += len(chunk)
+        
+        return selected_chunks
+    
+    def search_and_answer(self, query: str, content: str) -> str:
+        if not content or content.startswith("Error:"):
+            return "ไม่สามารถอ่านข้อมูลได้"
+        
+        # วิเคราะห์ประเภทคำถาม
+        query_analysis = self.analyze_query_type(query)
+        
+        relevant_chunks = self.find_relevant_chunks(content, query)
+        
+        if not relevant_chunks:
+            return "ไม่พบข้อมูลที่เกี่ยวข้องกับคำถาม"
+        
+        combined_content = "\n\n=== ข้อมูลส่วนที่เกี่ยวข้อง ===\n\n".join(relevant_chunks)
+        
+        # สร้าง Prompt ตามระดับความละเอียดที่ต้องการ
+        if query_analysis["detail_level"] == "low":
+            instruction = """
+ตอบแบบสั้นและตรงประเด็น:
+- ถ้าถามว่า "ต่ออะไรได้บ้าง" → ตอบเฉพาะชื่อคณะที่รับสมัคร (ไม่ต้องแจกแจงหลักสูตร)
+- ถ้าถามว่า "มีคณะอะไรบ้าง" → ตอบเฉพาะชื่อคณะ
+- ใช้ประโยคสั้นๆ หรือ bullet points ง่ายๆ
+- ไม่ต้องระบุรายละเอียดหลักสูตรย่อย
+"""
+        elif query_analysis["detail_level"] == "medium":
+            instruction = """
+ตอบแบบปานกลาง:
+- บอกจำนวนรวม (ถ้ามี)
+- แจกแจงชื่อคณะ/สาขา/หลักสูตร
+- จัดกลุ่มตามระดับการศึกษา (ถ้ามี)
+- ใช้ bullet points
+"""
+        else:  # high detail
+            instruction = """
+ตอบแบบละเอียด:
+- แจกแจงทุกรายการที่เกี่ยวข้อง
+- จัดกลุ่มและจัดหมวดหมู่ชัดเจน
+- ระบุตัวเลข ข้อมูลที่สำคัญ
+- ใช้ bullet points และเว้นบรรทัด
+"""
+        
+        prompt = f"""
+คำถาม: {query}
+
+ข้อมูลจาก KMUTNB:
+{combined_content}
+
+คำสั่งการตอบ:
+{instruction}
+
+ข้อห้าม:
+- ห้ามใช้: ครับ ค่ะ นะ
+- ห้ามอ้างอิง: หน้า ข้อ เอกสาร
+- ห้ามเสริมข้อมูลที่ไม่เกี่ยวข้อง
+- ตอบเฉพาะที่คำถามถาม ไม่ต้องขยายความเกินจำเป็น
+
+ตอบตามข้อมูลที่มี:
+"""
+        
+        try:
+            response = model.generate_content(prompt)
+            return self.clean_response(response.text)
+        except Exception as e:
+            return f"เกิดข้อผิดพลาด: {str(e)}"
+    
+    def clean_response(self, response: str) -> str:
+        if not response:
+            return "ไม่พบข้อมูลที่เกี่ยวข้อง"
+        
+        response = re.sub(r'\(หน้า\s*\d+[^)]*\)', '', response)
+        response = re.sub(r'\(ข้อ\s*[\d.]+\)', '', response)
+        response = re.sub(r'หน้า\s*\d+[^,\s]*', '', response)
+        response = re.sub(r'ข้อ\s*[\d.]+[^,\s]*', '', response)
+        
+        unwanted_patterns = [
+            r'จากเอกสาร[^.]*\.?',
+            r'ตามเอกสาร[^.]*\.?',
+            r'เอกสารระบุ[^.]*\.?',
+            r'ระบุไว้ใน[^.]*\.?',
+            r'\bครับ\b',
+            r'\bค่ะ\b',
+            r'\bนะ\b'
+        ]
+        
+        for pattern in unwanted_patterns:
+            response = re.sub(pattern, '', response, flags=re.IGNORECASE)
+        
+        lines = response.split('\n')
+        cleaned_lines = []
+        
+        for line in lines:
+            line = line.strip()
+            if line and not any(line.startswith(word) for word in ['อ้างอิง', 'ดูจาก', 'ตามที่', 'จากข้อมูล', 'ตามข้อมูล']):
+                line = re.sub(r'\s*\([^)]*หน้า[^)]*\)$', '', line)
+                line = re.sub(r'\s*\([^)]*ข้อ[^)]*\)$', '', line)
+                if line:
+                    cleaned_lines.append(line)
+        
+        response = '\n'.join(cleaned_lines)
+        response = re.sub(r'\n\s*\n\s*\n+', '\n\n', response)
+        response = re.sub(r' +', ' ', response)
+        
+        return response.strip()
+
+class RateLimiter:
     def __init__(self):
         if 'api_calls' not in st.session_state:
             st.session_state.api_calls = []
-        if 'api_errors' not in st.session_state:
-            st.session_state.api_errors = []
-        if 'total_tokens_used' not in st.session_state:
-            st.session_state.total_tokens_used = 0
     
-    def can_make_request(self):
+    def can_make_request(self) -> bool:
         current_time = time.time()
         st.session_state.api_calls = [
             call_time for call_time in st.session_state.api_calls 
             if current_time - call_time < 60
         ]
-        return len(st.session_state.api_calls) < 10
+        return len(st.session_state.api_calls) < 20
     
-    def add_request(self, tokens_used: int = 0):
+    def add_request(self):
         st.session_state.api_calls.append(time.time())
-        st.session_state.total_tokens_used += tokens_used
     
-    def add_error(self, error_msg: str):
-        st.session_state.api_errors.append({
-            'time': time.time(),
-            'error': error_msg
-        })
-        if len(st.session_state.api_errors) > 10:
-            st.session_state.api_errors = st.session_state.api_errors[-10:]
-    
-    def time_until_next_request(self):
+    def get_wait_time(self) -> int:
         if not st.session_state.api_calls:
             return 0
-        oldest_call = min(st.session_state.api_calls)
-        return max(0, 60 - (time.time() - oldest_call))
-
-    def get_recent_errors(self):
+        current_time = time
         current_time = time.time()
-        return [
-            error for error in st.session_state.api_errors
-            if current_time - error['time'] < 300
-        ]
+        oldest_call = min(st.session_state.api_calls)
+        return max(0, int(60 - (current_time - oldest_call)))
 
-rate_limiter = EnhancedRateLimiter()
-
-# Document management with OCR and expert role support
-class DocumentManager:
-    def __init__(self):
-        if 'document_content' not in st.session_state:
-            st.session_state.document_content = None
-        if 'document_metadata' not in st.session_state:
-            st.session_state.document_metadata = {}
-        if 'document_sections' not in st.session_state:
-            st.session_state.document_sections = {}
-        if 'document_keywords' not in st.session_state:
-            st.session_state.document_keywords = []
-        if 'last_file_path' not in st.session_state:
-            st.session_state.last_file_path = None
-        if 'use_ocr' not in st.session_state:
-            st.session_state.use_ocr = False
-        if 'expert_role' not in st.session_state:
-            st.session_state.expert_role = ""
-    
-    def load_document(self, file_path: str, use_ocr: bool = False, expert_role: str = "") -> tuple[str, str]:
-        # ตรวจสอบว่าต้องโหลดใหม่หรือไม่
-        needs_reload = (
-            st.session_state.last_file_path != file_path or
-            st.session_state.use_ocr != use_ocr or
-            st.session_state.expert_role != expert_role or
-            not st.session_state.document_content
-        )
-        
-        if not needs_reload:
-            return st.session_state.document_content, "✅ ใช้เอกสารที่โหลดไว้แล้ว"
-        
-        if not os.path.exists(file_path):
-            search_paths = self._get_search_paths(file_path)
-            
-            for path in search_paths:
-                if os.path.exists(path):
-                    file_path = path
-                    break
-            else:
-                return None, f"ไม่พบไฟล์เอกสาร: {file_path}"
-        
-        try:
-            if ENHANCED_READER_AVAILABLE:
-                reader = EnhancedDocumentReader(file_path, use_ocr=use_ocr, expert_role=expert_role)
-                content = reader.get_comprehensive_summary()
-                
-                st.session_state.document_metadata = reader.metadata
-                st.session_state.document_sections = reader.sections
-                st.session_state.document_keywords = list(reader.keywords)
-                
-                status = f"โหลดเอกสารสำเร็จ (Enhanced Mode)"
-                if use_ocr:
-                    status += " + OCR"
-                if expert_role:
-                    status += f" | ผู้เชี่ยวชาญ: {expert_role}"
-                status += f" - {len(content):,} ตัวอักษร"
-                
-                if reader.metadata:
-                    status += f" | หน้า: {reader.metadata.get('pages', 'ไม่ทราบ')}"
-            else:
-                content = get_kmutnb_summary(file_path, use_ocr=use_ocr, expert_role=expert_role)
-                status = f"โหลดเอกสารสำเร็จ (Basic Mode) - {len(content):,} ตัวอักษร"
-            
-            if content.startswith("Error:"):
-                return None, content
-            
-            st.session_state.document_content = content
-            st.session_state.last_file_path = file_path
-            st.session_state.use_ocr = use_ocr
-            st.session_state.expert_role = expert_role
-            
-            return content, status
-            
-        except Exception as e:
-            error_msg = f"❌ เกิดข้อผิดพลาด: {str(e)}"
-            return None, error_msg
-    
-    def _get_search_paths(self, original_path: str) -> List[str]:
-        current_dir = os.path.dirname(__file__) if __file__ else os.getcwd()
-        filename = os.path.basename(original_path)
-        
-        search_paths = [
-            original_path,
-            os.path.join(current_dir, filename),
-            os.path.join(current_dir, "dataset_reseach.pdf"),
-            os.path.join(current_dir, "dataset.pdf"),
-            os.path.join(current_dir, "data.pdf"),
-            os.path.join(current_dir, "kmutnb.pdf"),
-            os.path.join(current_dir, "kmutnb_data.pdf"),
-            os.path.join(current_dir, "documents", filename),
-            os.path.join(current_dir, "data", filename),
-        ]
-        
-        return search_paths
-    
-    def search_document(self, search_term: str) -> str:
-        if not st.session_state.document_content:
-            return "❌ ไม่มีเอกสารที่โหลดไว้"
-        
-        if ENHANCED_READER_AVAILABLE and st.session_state.last_file_path:
-            return search_in_document(
-                st.session_state.last_file_path, 
-                search_term, 
-                use_ocr=st.session_state.use_ocr
-            )
-        else:
-            content = st.session_state.document_content
-            lines = content.split('\n')
-            found_lines = []
-            
-            for i, line in enumerate(lines):
-                if search_term.lower() in line.lower():
-                    context_start = max(0, i-1)
-                    context_end = min(len(lines), i+2)
-                    context = lines[context_start:context_end]
-                    found_lines.append(f"=== บรรทัดที่ {i+1} ===\n" + '\n'.join(context) + "\n")
-            
-            if found_lines:
-                return f"🔍 พบคำว่า '{search_term}' ในเอกสาร {len(found_lines)} ตำแหน่ง:\n\n" + '\n'.join(found_lines[:5])
-            else:
-                return f"❌ ไม่พบคำว่า '{search_term}' ในเอกสาร"
-
-doc_manager = DocumentManager()
+# Initialize components
+doc_processor = DocumentProcessor()
+searcher = SmartSearcher()
+rate_limiter = RateLimiter()
 
 def clear_history():
     st.session_state["messages"] = [
-        {"role": "model", "content": "KMUTNB Chatbot สวัสดีค่ะ คุณลูกค้า สอบถามข้อมูลเกี่ยวกับ KMUTNB เรื่องใดคะ"}
+        {"role": "assistant", "content": "สอบถามข้อมูลเกี่ยวกับมหาวิทยาลัยเทคโนโลยีพระจอมเกล้าพระนครเหนือ"}
     ]
     st.rerun()
-
-def safe_api_call(api_function, max_retries=3):
-    for attempt in range(max_retries):
-        try:
-            if not rate_limiter.can_make_request():
-                wait_time = rate_limiter.time_until_next_request()
-                if wait_time > 0:
-                    st.warning(f"⏳ รอ {wait_time:.0f} วินาที เนื่องจาก rate limit")
-                    time.sleep(wait_time + 1)
-            
-            result = api_function()
-            rate_limiter.add_request(tokens_used=100)
-            return result
-            
-        except ResourceExhausted as e:
-            error_msg = f"API quota เกิน (ครั้งที่ {attempt + 1})"
-            rate_limiter.add_error(error_msg)
-            
-            wait_time = 60 * (attempt + 1)
-            if attempt < max_retries - 1:
-                st.warning(f"⚠️ {error_msg}! รอ {wait_time} วินาที...")
-                time.sleep(wait_time)
-            else:
-                return "ขออภัยค่ะ ระบบกำลังยุ่ง กรุณาลองใหม่ในอีกสักครู่นะคะ 🙏"
-                
-        except Exception as e:
-            error_msg = f"API Error: {str(e)}"
-            rate_limiter.add_error(error_msg)
-            
-            if attempt < max_retries - 1:
-                st.warning(f"⚠️ {error_msg} (ลองใหม่ครั้งที่ {attempt + 2})")
-                time.sleep(5 * (attempt + 1))
-            else:
-                return f"เกิดข้อผิดพลาด: {str(e)}"
-    
-    return "ไม่สามารถประมวลผลได้ในขณะนี้"
-
-def enhanced_response_generation(prompt: str, document_content: str, expert_role: str = "") -> str:
-    question_type = analyze_question_type(prompt)
-    enhanced_prompt = enhance_prompt_based_on_type(prompt, question_type, expert_role)
-    
-    def generate_response():
-        history = []
-        
-        history.append({
-            "role": "user", 
-            "parts": [{"text": f"เอกสารอ้างอิง:\n{document_content}"}]
-        })
-        
-        recent_messages = st.session_state["messages"][-10:]
-        for msg in recent_messages:
-            history.append({
-                "role": msg["role"], 
-                "parts": [{"text": msg["content"]}]
-            })
-        
-        chat_session = model.start_chat(history=history)
-        response = chat_session.send_message(enhanced_prompt)
-        return response.text
-    
-    return safe_api_call(generate_response)
-
-def analyze_question_type(prompt: str) -> str:
-    prompt_lower = prompt.lower()
-    
-    if any(word in prompt_lower for word in ['ค้นหา', 'หา', 'search', 'find']):
-        return 'search'
-    elif any(word in prompt_lower for word in ['เปรียบเทียบ', 'compare', 'ต่าง', 'เหมือน']):
-        return 'compare'
-    elif any(word in prompt_lower for word in ['อธิบาย', 'explain', 'คืออะไร', 'ทำไม', 'อย่างไร']):
-        return 'explain'
-    elif any(word in prompt_lower for word in ['รายชื่อ', 'list', 'มีอะไรบ้าง', 'ทั้งหมด']):
-        return 'list'
-    elif any(word in prompt_lower for word in ['ตัวอย่าง', 'example', 'เช่น']):
-        return 'example'
-    else:
-        return 'general'
-
-def enhance_prompt_based_on_type(prompt: str, question_type: str, expert_role: str = "") -> str:
-    base_enhancement = ""
-    if expert_role:
-        base_enhancement = f"คุณเป็นผู้เชี่ยวชาญด้าน {expert_role} กรุณาตอบคำถามในฐานะผู้เชี่ยวชาญ: "
-    
-    enhancements = {
-        'search': f"{base_enhancement}กรุณาค้นหาข้อมูลที่เกี่ยวข้องในเอกสารและตอบอย่างละเอียด: ",
-        'compare': f"{base_enhancement}กรุณาเปรียบเทียบและวิเคราะห์ความแตกต่างอย่างชัดเจน: ",
-        'explain': f"{base_enhancement}กรุณาอธิบายอย่างละเอียดและให้ตัวอย่างประกอบ: ",
-        'list': f"{base_enhancement}กรุณาจัดทำรายการที่ครบถ้วนและเรียงลำดับ: ",
-        'example': f"{base_enhancement}กรุณาให้ตัวอย่างที่ชัดเจนและหลากหลาย: ",
-        'general': f"{base_enhancement}กรุณาตอบคำถามอย่างละเอียดและครบถ้วน: "
-    }
-    
-    return enhancements.get(question_type, base_enhancement + "กรุณาตอบคำถามอย่างละเอียดและครบถ้วน: ") + prompt
 
 # Page config
 st.set_page_config(
     page_title="KMUTNB Chatbot",
     page_icon="🎓",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="centered"
 )
 
-# Sidebar with enhanced controls
+# Sidebar
 with st.sidebar:
-    st.header("Settings")
+    st.header("⚙️ การตั้งค่า")
     
-    # OCR Settings
-    use_ocr = st.checkbox("OCR PDF", value=False, 
-                         help="เปิดใช้ OCR เพื่ออ่าน PDF ที่เป็นภาพหรือ scanned document")
+    file_path = st.text_input(
+        "เส้นทางไฟล์:", 
+        value="/Users/zayxaxto/Documents/kmutnb_chatbot/workaw/FinalDataset.pdf"
+    )
     
-    # Expert Role Settings
-    expert_role = st.text_input("Role", 
-                               placeholder="",
-                               help="กำหนดบทบาทเพื่อให้การตอบคำถามแม่นยำขึ้น")
-    
-    # Document Settings
-    st.subheader("Document")
-    file_path = st.text_input("Path File Document", 
-                             value="/Users/zayxaxto/Documents/kmutnb_chatbot/workaw/dataset_reseach.pdf",
-                             help="ระบุ path ของไฟล์เอกสาร")
-    
-    if st.button("Reload", use_container_width=True):
-        st.session_state.document_content = None
+    if st.button("🔄 โหลดใหม่", use_container_width=True):
+        if 'document_content' in st.session_state:
+            del st.session_state.document_content
         st.rerun()
     
-    if st.button("Clear History", use_container_width=True):
+    if st.button("🗑️ ล้างประวัติ", use_container_width=True):
         clear_history()
-
-   
+    
+    if 'document_content' in st.session_state:
+        content = st.session_state.document_content
+        if content and not content.startswith("Error:"):
+            paragraphs = len([p for p in re.split(r'\n\s*\n', content) if p.strip()])
+            st.success(f"📄 โหลดสำเร็จ!")
+            st.info(f"📊 {paragraphs} ย่อหน้า")
+            st.info(f"📝 {len(content):,} ตัวอักษร")
 
 # Main app
-st.title("💬 KMUTNB Enhanced Chatbot")
-st.write("ระบบ AI ตอบคำถามเกี่ยวกับ KMUTNB อย่างละเอียดและแม่นยำ")
+st.title("🎓 KMUTNB Chatbot")
+st.caption("ระบบค้นหาข้อมูลอัจฉริยะสำหรับ KMUTNB")
+
+# Load document
+if 'document_content' not in st.session_state:
+    if file_path.strip():
+        with st.spinner("กำลังอ่านไฟล์ PDF..."):
+            content = doc_processor.read_pdf_optimized(file_path)
+            st.session_state.document_content = content
+            
+            if content.startswith("Error:"):
+                st.error(f"❌ {content}")
+            else:
+                paragraphs = len([p for p in re.split(r'\n\s*\n', content) if p.strip()])
+                st.success(f"✅ อ่านไฟล์สำเร็จ {paragraphs} ย่อหน้า!")
 
 # Initialize messages
 if "messages" not in st.session_state:
     st.session_state["messages"] = [
-        {
-            "role": "model",
-            "content": "KMUTNB Chatbot สวัสดีค่ะ คุณลูกค้า สอบถามข้อมูลเกี่ยวกับ KMUTNB เรื่องใดคะ ระบบได้รับการปรับปรุงให้อ่านเอกสารได้ละเอียดและตอบคำถามได้แม่นยำมากขึ้นแล้วค่ะ",
-        }
+        {"role": "assistant", "content": "สอบถามข้อมูลเกี่ยวกับมหาวิทยาลัยเทคโนโลยีพระจอมเกล้าพระนครเหนือ"}
     ]
-
-# Load document with new settings
-file_content, load_status = doc_manager.load_document(file_path, use_ocr=use_ocr, expert_role=expert_role)
-
-# Display load status
-if file_content is None:
-    st.error(f"❌ {load_status}")
-    st.info("💡 วิธีแก้ไข: ตรวจสอบ path ของไฟล์หรือวางไฟล์ในโฟลเดอร์เดียวกันกับ app.py")
-    
-    with st.expander("📁 ตำแหน่งที่ระบบจะค้นหาไฟล์"):
-        search_paths = doc_manager._get_search_paths(file_path)
-        for path in search_paths:
-            status = "✅" if os.path.exists(path) else "❌"
-            st.markdown(f"**{status}** `{path}`")
-else:
-    st.success(f"✅ {load_status}")
 
 # Display messages
 for msg in st.session_state["messages"]:
@@ -405,29 +575,26 @@ for msg in st.session_state["messages"]:
         st.write(msg["content"])
 
 # Chat input
-if prompt := st.chat_input("💭 Type your question"):
-    if file_content is None:
-        st.error("❌ กรุณาโหลดเอกสารก่อนใช้งาน")
+if prompt := st.chat_input("พิมพ์คำถาม..."):
+    if 'document_content' not in st.session_state:
+        st.error("❌ กรุณาโหลดไฟล์ก่อน")
         st.stop()
     
     if not rate_limiter.can_make_request():
-        wait_time = rate_limiter.time_until_next_request()
-        st.error(f"⏳ กรุณารอ {wait_time:.0f} วินาที ก่อนส่งข้อความใหม่")
+        wait_time = rate_limiter.get_wait_time()
+        st.error(f"❌ กรุณารอ {wait_time} วินาที")
         st.stop()
     
+    # Add user message
     st.session_state["messages"].append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.write(prompt)
     
-    with st.chat_message("model"):
-        with st.spinner("🤔 กำลังประมวลผลอย่างละเอียด..."):
+    # Generate response
+    with st.chat_message("assistant"):
+        with st.spinner("กำลังค้นหาข้อมูล..."):
+            response = searcher.search_and_answer(prompt, st.session_state.document_content)
+            rate_limiter.add_request()
             
-            if prompt.lower().startswith("ค้นหา:") or prompt.lower().startswith("search:"):
-                search_term = prompt.split(":", 1)[1].strip()
-                response_text = doc_manager.search_document(search_term)
-            else:
-                response_text = enhanced_response_generation(prompt, file_content, expert_role)
-            
-            st.write(response_text)
-            st.session_state["messages"].append({"role": "model", "content": response_text})
-
+            st.write(response)
+            st.session_state["messages"].append({"role": "assistant", "content": response})
